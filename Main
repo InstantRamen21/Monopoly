@@ -1,0 +1,813 @@
+#include "timerISR.h"
+#include "helper.h"
+#include "periph.h"
+#include "serialATmega.h"
+#include "irAVR.h"
+#include "LCD.h"
+#include <stdio.h>
+#include <stdlib.h> 
+#include <time.h> 
+
+
+//TODO: declare variables for cross-task communication
+int diceroll1 = 0;
+unsigned int locations [40] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39};
+unsigned int locationprices [40] = {0, 60, 0, 60, 0, 200, 100, 0, 100, 120, 0, 140, 150, 140, 160, 200, 180, 0, 180, 200, 0, 220, 0, 220, 240, 200, 260, 260, 150, 280, 0, 300, 300, 0, 320, 200, 0, 350, 0, 400};
+unsigned int locationrent [40] = {0, 100, 0, 100, 0, 300, 150, 0, 150, 200, 0, 240, 250, 250, 280, 300, 300, 0, 300, 320, 0, 350, 0, 360, 380, 320, 400, 400, 250, 410, 0, 430, 430, 0, 450, 340, 0, 500, 0, 550};
+signed int locationownership [40] = {-1, 0, -1, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, 0, 0, 0, 0, -1, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, -1, 0};
+signed int resetownership [40] = {-1, 0, -1, 0, -1, 0, 0, -1, 0, 0, -1, 0, 0, 0, 0, 0, 0, -1, 0, 0, -1, 0, -1, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, -1, 0, 0, -1, 0, -1, 0};
+signed int player1money = 1500;
+signed int player2money = 1500;
+signed int player3money = 1500;
+signed int player4money = 1500;
+signed int currplayer = 1;
+signed int player1location = 0;
+signed int player2location = 0;
+signed int player3location = 0;
+signed int player4location = 0;
+int resetcount = 0;
+decode_results remote;
+char buffer[50];
+int notes [37] = {131, 131, 196, 196, 220, 220, 196, 0, 0, 175, 175, 165, 165, 147, 147, 131, 0, 0, 196, 196, 175, 175, 165, 165, 147, 0, 0, 196, 196, 175, 175, 165, 165, 147, 0, 0, 0};
+
+/* A: 220
+C: 131
+D: 147
+E: 165
+F: 175
+G: 196 */
+
+#define NUM_TASKS 9 //TODO: Change to the number of tasks being used
+
+
+//Task struct for concurrent synchSMs implmentations
+typedef struct _task{
+	int state; 		//Task's current state
+	unsigned long period; 		//Task period
+	unsigned long elapsedTime; 	//Time elapsed since last task tick
+	int (*TickFct)(int); 		//Task tick function
+} task;
+
+
+//TODO: Define Periods for each task
+// e.g. const unsigned long TASK1_PERIOD = <PERIOD>
+const unsigned long GCD_PERIOD = 1;//TODO:Set the GCD Period
+const unsigned long periodBuzzer = 700;
+const unsigned long periodDisplay_DiceRoll = 1;
+const unsigned long periodDisplay = 2000;
+const unsigned long periodRemote = 500;
+const unsigned long periodRoll = 100;
+const unsigned long periodBuy = 100;
+const unsigned long periodLED = 100;
+const unsigned long periodRent = 100;
+const unsigned long periodReset = 100;
+
+
+task tasks[NUM_TASKS]; // declared task array with NUM_TASKS tasks
+
+
+void TimerISR() {
+	for ( unsigned int i = 0; i < NUM_TASKS; i++ ) {                   // Iterate through each task in the task array
+		if ( tasks[i].elapsedTime == tasks[i].period ) {           // Check if the task is ready to tick
+			tasks[i].state = tasks[i].TickFct(tasks[i].state); // Tick and set the next state for this task
+			tasks[i].elapsedTime = 0;                          // Reset the elapsed time for the next tick
+		}
+		tasks[i].elapsedTime += GCD_PERIOD;                        // Increment the elapsed time by GCD_PERIOD
+	}
+}
+
+
+
+//TODO: Create your tick functions for each task
+
+enum Buzzer_States {Buzzer_Start, Buzzer_Off, Buzzer_On, Stop};
+int TickFCT_Buzzer(int state);
+
+enum Display_DiceRoll_States {Display_DiceRoll_Start, Display};
+int TickFCT_Display_DiceRoll(int state);
+
+enum Display_States {Display_Start, P1, P2, P3, P4, Game_Over};
+int TickFCT_Display(int state);
+
+enum Remote_States {Remote_Start, Read};
+int TickFCT_Remote(int state);
+
+enum Roll_States {Roll_Start, Roll};
+int TickFCT_Roll(int state);
+
+enum Buy_States {Buy_Start, Buy};
+int TickFCT_Buy(int state);
+
+enum LED_States {LED_Start, Light};
+int TickFCT_LED(int state);
+
+enum Rent_States {Rent_Start, Rent};
+int TickFCT_Rent(int state);
+
+enum Reset_States {Reset_Start, Reset};
+int TickFCT_Reset(int state);
+
+
+int main(void) {
+    //TODO: initialize all your inputs and ouputs
+
+    DDRB = 0xFE; //port B is all output except PB0
+    PORTB = 0x01;
+
+    DDRC = 0xFF; //port C is all output
+    PORTC = 0x00;
+
+    DDRD = 0xFF; //port D is all output
+    PORTD = 0x00;
+
+    
+
+    ADC_init();   // initializes ADC
+    serial_init(9600);
+    IRinit(&PORTB, &PINB, 0);
+    lcd_init();
+    
+
+    srand(time(0)); // get random seed
+
+
+    //TODO: Initialize the buzzer timer/pwm(timer1)
+
+    TCCR1A |= (1 << WGM11) | (1 << COM1A1); //COM1A1 sets it to channel A
+    TCCR1B |= (1 << WGM12) | (1 << WGM13) | (1 << CS11); //CS11 sets the prescaler to be 8
+    //WGM11, WGM12, WGM13 set timer to fast pwm mode
+
+    PORTC = SetBit(PORTC, 5, 0); // turn rgb led to red
+    PORTC = SetBit(PORTC, 4, 0); // turn rgb led to green
+    PORTC = SetBit(PORTC, 3, 0); // turn rgb led to blue
+
+
+
+    //TODO: Initialize tasks here
+    // e.g. 
+    // tasks[0].period = ;
+    // tasks[0].state = ;
+    // tasks[0].elapsedTime = ;
+    // tasks[0].TickFct = ;
+
+    unsigned char i = 0;
+
+    tasks[i].state = Buzzer_Start;
+    tasks[i].period = periodBuzzer;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_Buzzer;
+    i++;
+
+    tasks[i].state = Display_DiceRoll_Start;
+    tasks[i].period = periodDisplay_DiceRoll;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_Display_DiceRoll;
+    i++;
+
+    tasks[i].state = Display_Start;
+    tasks[i].period = periodDisplay;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_Display;
+    i++;
+
+    tasks[i].state = Remote_Start;
+    tasks[i].period = periodRemote;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_Remote;
+    i++;
+
+    tasks[i].state = Roll_Start;
+    tasks[i].period = periodRoll;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_Roll;
+    i++;
+
+    tasks[i].state = Buy_Start;
+    tasks[i].period = periodBuy;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_Buy;
+    i++;
+
+    tasks[i].state = LED_Start;
+    tasks[i].period = periodLED;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_LED;
+    i++;
+
+    tasks[i].state = Rent_Start;
+    tasks[i].period = periodRent;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_Rent;
+    i++;
+
+    tasks[i].state = Reset_Start;
+    tasks[i].period = periodReset;
+    tasks[i].elapsedTime = tasks[i].period;
+    tasks[i].TickFct = &TickFCT_Reset;
+
+
+    TimerSet(GCD_PERIOD);
+    TimerOn();
+
+    while (1) {}
+
+    return 0;
+}
+
+
+
+// enum Buzzer_States {Buzzer_Start, Buzzer_Off, Buzzer_On, Stop};
+int TickFCT_Buzzer(int state) {
+    static unsigned int i;
+    static int frequency;
+    switch(state) {
+        case Buzzer_Start:
+        i = 0;
+        frequency = 131;
+        state = Buzzer_Off;
+        break;
+
+        case Buzzer_Off:
+        if (player1money <= 0 || player2money <= 0 || player3money <= 0 || player4money <= -1) {
+            state = Stop;
+        }
+        else if (i == 7 || i == 16 || i == 26 || i == 34 || i == 8 || i == 17 || i == 25 || i == 35) {
+            i++;
+            state = Buzzer_Off;
+        }
+        else if (i == 36) {
+            i = 0;
+            state = Buzzer_On;
+        }
+        
+        else {
+            state = Buzzer_On;
+        }
+        break;
+
+        case Buzzer_On:
+        if (i < 36)
+        i++;
+        else {
+            i = 0;
+        }
+            state = Buzzer_Off;
+        break;
+
+        case Stop:
+        break;
+
+        default:
+        break;
+    }
+
+    switch(state) {
+        case Buzzer_Off:
+        OCR1A = 39999; //setting OCR1A to 39999 turns buzzer off
+        break;
+
+        case Buzzer_On:
+        frequency = notes[i];
+        ICR1 = 16000000 / (8 * frequency);
+        OCR1A = ICR1 * 0.5;
+        break;
+
+        case Stop:
+        
+        break;
+
+    default:
+    break;
+    }
+    return state;
+}
+
+//enum Display_DiceRoll_States {Display_DiceRoll_Start, Display};
+int TickFCT_Display_DiceRoll(int state) {
+  switch(state) { // Transitions
+     case Display_DiceRoll_Start: // Initial transition
+        state = Display;
+        break;
+
+        case Display:
+        break;
+    
+     default:
+        break;
+   } // Transitions
+
+  switch(state) { // State actions
+        case Display:
+        shiftOut(diceroll1);
+        break;
+
+     default:
+        break;
+  } // State actions
+  return state;
+}
+
+// {Display_Start, P1, P2, P3, P4, Game_Over};
+int TickFCT_Display(int state) {
+    switch(state) { // Transitions
+     case Display_Start: // Initial transition   // Initialization behavior
+        currplayer = 1;
+        state = P1;
+        break;
+
+        case P1:
+
+        if (remote.value == 16724175) {
+            
+        remote.value = -1;
+        currplayer = 2;
+            state = P2;
+        }
+
+        else if (player1money <= 0) {
+            lcd_goto_xy(0,0);
+    lcd_clear(); 
+        lcd_write_str("Player 1 Loses");
+        state = Game_Over;
+        }
+        
+        break;
+
+        case P2:
+        if (remote.value == 16724175) {
+            
+        remote.value = -1;
+        currplayer = 3;
+            state = P3;
+        }
+         else if (player2money <= 0) {
+            lcd_goto_xy(0,0);
+    lcd_clear(); 
+        lcd_write_str("Player 2 Loses");
+        state = Game_Over;
+        }
+
+        break;
+
+        case P3:
+        if (remote.value == 16724175) {
+            
+        remote.value = -1;
+        currplayer = 4;
+            state = P4;
+        }
+         else if (player3money <= 0) {
+            lcd_goto_xy(0,0);
+    lcd_clear(); 
+        lcd_write_str("Player 3 Loses");
+        state = Game_Over;
+        }
+
+        break;
+
+        case P4:
+        if (remote.value == 16724175) {
+            
+        remote.value = -1;
+        currplayer = 1;
+            state = P1;
+        }
+        
+        else if (player4money <= -1) {
+            lcd_goto_xy(0,0);
+    lcd_clear(); 
+        lcd_write_str("Player 4 Loses");
+        state = Game_Over;
+        }
+
+        break;
+
+        case Game_Over:
+        break;
+        
+     default:
+        break;
+   } // Transitions
+
+  switch(state) { // State actions
+     case P1:
+     lcd_goto_xy(0,0);
+    lcd_clear(); 
+    sprintf(buffer, "P1M:%d", player1money);
+        lcd_write_str(buffer);
+        sprintf(buffer, " P1L:%d", player1location);
+        lcd_write_str(buffer);
+        lcd_goto_xy(1,0);
+        sprintf(buffer, "P:%d", locationprices[player1location]);
+        lcd_write_str(buffer);
+        sprintf(buffer, " R:%d", locationrent[player1location]);
+        lcd_write_str(buffer);
+        currplayer = 1;
+    
+      break;
+
+      case P2:
+      lcd_goto_xy(0,0);
+    lcd_clear(); 
+    sprintf(buffer, "P2M:%d", player2money);
+        lcd_write_str(buffer);
+        sprintf(buffer, " P2L:%d", player2location);
+        lcd_write_str(buffer);
+        lcd_goto_xy(1,0);
+        sprintf(buffer, "P:%d", locationprices[player2location]);
+        lcd_write_str(buffer);
+        sprintf(buffer, " R:%d", locationrent[player2location]);
+        lcd_write_str(buffer);
+      
+      break;
+
+      case P3:
+      lcd_goto_xy(0,0);
+    lcd_clear(); 
+    sprintf(buffer, "P3M:%d", player3money);
+        lcd_write_str(buffer);
+        sprintf(buffer, " P3L:%d", player3location);
+        lcd_write_str(buffer);
+        lcd_goto_xy(1,0);
+        sprintf(buffer, "P:%d", locationprices[player3location]);
+        lcd_write_str(buffer);
+        sprintf(buffer, " R:%d", locationrent[player3location]);
+        lcd_write_str(buffer);
+      
+      break;
+
+      case P4:
+      lcd_goto_xy(0,0);
+    lcd_clear(); 
+    sprintf(buffer, "P4M:%d", player4money);
+        lcd_write_str(buffer);
+        sprintf(buffer, " P4L:%d", player4location);
+        lcd_write_str(buffer);
+        lcd_goto_xy(1,0);
+        sprintf(buffer, "P:%d", locationprices[player4location]);
+        lcd_write_str(buffer);
+        sprintf(buffer, " R:%d", locationrent[player4location]);
+        lcd_write_str(buffer);
+      
+      break;
+
+      case Game_Over:
+
+      break;
+     
+     default:
+        break;
+  } // State actions
+  return state;
+}
+
+// enum Remote_States {Remote_Start, Read};
+int TickFCT_Remote(int state) {
+    switch(state) {
+        case Remote_Start:
+        state = Read;
+        break;
+
+        case Read:
+        break;
+
+        default:
+        break;
+    }
+        switch(state) {
+            case Read:
+      if (IRdecode(&remote)) {
+        serial_println(remote.value);
+      }
+      IRresume();
+      break;
+
+      default:
+      break;
+        }
+    
+    return state;
+}
+
+// enum Roll_States {Roll_Start, Roll};
+int TickFCT_Roll(int state) {
+    switch(state) {
+        case Roll_Start:
+        state = Roll;
+        break;
+
+        case Roll:
+        break;
+
+        default:
+        break;
+    }
+        switch(state) {
+            case Roll:
+            if (remote.value == 16738455 && currplayer == 1) {
+                diceroll1 = (rand() % 6 + 1); // get random number from 1 to 6
+                if (player1location + diceroll1 >= 40) {
+                    player1location = player1location - 40;
+                    player1location = player1location + diceroll1;
+                }
+                else {
+                    player1location = player1location + diceroll1;
+                }
+                
+                remote.value = -1;
+            }
+            else if (remote.value == 16738455 && currplayer == 2) {
+                diceroll1 = (rand() % 6 + 1); // get random number from 1 to 6
+                if (player2location + diceroll1 >= 40) {
+                    player2location = player2location - 40;
+                    player2location = player2location + diceroll1;
+                }
+                else {
+                    player2location = player2location + diceroll1;
+                }
+                
+                remote.value = -1;
+            }
+            else if (remote.value == 16738455 && currplayer == 3) {
+                diceroll1 = (rand() % 6 + 1); // get random number from 1 to 6
+                if (player3location + diceroll1 >= 40) {
+                    player3location = player3location - 40;
+                    player3location = player3location + diceroll1;
+                }
+                else {
+                    player3location = player3location + diceroll1;
+                }
+                
+                remote.value = -1;
+            }
+            else if (remote.value == 16738455 && currplayer == 4) {
+                diceroll1 = (rand() % 6 + 1); // get random number from 1 to 6
+                if (player4location + diceroll1 >= 40) {
+                    player4location = player4location - 40;
+                    player4location = player4location + diceroll1;
+                }
+                else {
+                    player4location = player4location + diceroll1;
+                }
+                
+                remote.value = -1;
+            }
+      break;
+
+      default:
+      break;
+        }
+    
+    return state;
+}
+
+//enum Buy_States {Buy_Start, Buy};
+int TickFCT_Buy(int state) {
+    switch(state) {
+        case Buy_Start:
+        state = Buy;
+        break;
+
+        case Buy:
+        break;
+
+        default:
+        break;
+    }
+        switch(state) {
+            case Buy:
+            if (remote.value == 16718055 && currplayer == 1 && (locationownership[player1location] == 0)) {
+                player1money = player1money - locationprices[player1location];
+                locationownership[player1location] = 1;
+                remote.value = -1;
+            }
+            else if (remote.value == 16718055 && currplayer == 2 && (locationownership[player2location] == 0)) {
+                player2money = player2money - locationprices[player2location];
+                locationownership[player2location] = 2;
+                remote.value = -1;
+            }
+            else if (remote.value == 16718055 && currplayer == 3 && (locationownership[player3location] == 0)) {
+                player3money = player3money - locationprices[player3location];
+                locationownership[player3location] = 3;
+                remote.value = -1;
+            }
+            else if (remote.value == 16718055 && currplayer == 4 && (locationownership[player4location] == 0)) {
+                player4money = player4money - locationprices[player4location];
+                locationownership[player4location] = 4;
+                remote.value = -1;
+            }
+      break;
+
+      default:
+      break;
+        }
+    
+    return state;
+}
+
+//enum LED_States {LED_Start, Light};
+//PORTC = SetBit(PORTC, 5, 1); // turn rgb led to red
+//PORTC = SetBit(PORTC, 4, 1); // turn rgb led to green
+//PORTC = SetBit(PORTC, 3, 1); // turn rgb led to blue
+int TickFCT_LED(int state) {
+    switch(state) {
+        case LED_Start:
+        state = Light;
+        break;
+
+        case Light:
+        break;
+
+        default:
+        break;
+    }
+        switch(state) {
+            case Light:
+            if (currplayer == 1 && locationownership[player1location] == 0) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+                PORTC = SetBit(PORTC, 4, 1);
+            }
+            else if (currplayer == 1 && (locationownership[player1location] == 2 || locationownership[player1location] == 3 || locationownership[player1location] == 4)) {
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+                PORTC = SetBit(PORTC, 5, 1);
+            }
+            else if (currplayer == 1 && (locationownership[player1location] == -1 || locationownership[player1location] == 1)) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 1);
+            }
+            else if (currplayer == 2 && locationownership[player2location] == 0) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+                PORTC = SetBit(PORTC, 4, 1);
+            }
+            else if (currplayer == 2 && (locationownership[player2location] == 1 || locationownership[player2location] == 3 || locationownership[player2location] == 4)) {
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+                PORTC = SetBit(PORTC, 5, 1);
+            }
+            else if (currplayer == 2 && (locationownership[player2location] == -1 || locationownership[player2location] == 2)) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 1);
+            }
+            else if (currplayer == 3 && locationownership[player3location] == 0) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+                PORTC = SetBit(PORTC, 4, 1);
+            }
+            else if (currplayer == 3 && (locationownership[player3location] == 1 || locationownership[player3location] == 2 || locationownership[player3location] == 4)) {
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+                PORTC = SetBit(PORTC, 5, 1);
+            }
+            else if (currplayer == 3 && (locationownership[player3location] == -1 || locationownership[player3location] == 3)) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 1);
+            }
+            else if (currplayer == 4 && locationownership[player4location] == 0) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+                PORTC = SetBit(PORTC, 4, 1);
+            }
+            else if (currplayer == 4 && (locationownership[player4location] == 1 || locationownership[player4location] == 2 || locationownership[player4location] == 3)) {
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+                PORTC = SetBit(PORTC, 5, 1);
+            }
+            else if (currplayer == 4 && (locationownership[player4location] == -1 || locationownership[player4location] == 4)) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 1);
+            }
+            else if (player1money <= 0 || player2money <= 0 || player3money <= 0 || player4money <= -1) {
+                PORTC = SetBit(PORTC, 5, 0); 
+                PORTC = SetBit(PORTC, 4, 0); 
+                PORTC = SetBit(PORTC, 3, 0); 
+            }
+      break;
+
+      default:
+      break;
+        }
+    
+    return state;
+}
+
+//enum Rent_States {Rent_Start, Rent};
+int TickFCT_Rent(int state) {
+    switch(state) {
+        case Rent_Start:
+        state = Rent;
+        break;
+
+        case Rent:
+        break;
+
+        default:
+        break;
+    }
+        switch(state) {
+            case Rent:
+            if (currplayer == 1 && remote.value == 16743045) {
+                player1money = player1money - locationrent[player1location];
+                if (locationownership[player1location] == 2) {
+                    player2money = player2money + locationrent[player1location];
+                }
+                else if (locationownership[player1location] == 3) {
+                    player3money = player3money + locationrent[player1location];
+                }
+                else if (locationownership[player1location] == 4) {
+                    player4money = player4money + locationrent[player1location];
+                }
+                remote.value = -1;
+            }
+            else if (currplayer == 2 && remote.value == 16743045) {
+                player2money = player2money - locationrent[player2location];
+                if (locationownership[player2location] == 1) {
+                    player1money = player1money + locationrent[player2location];
+                }
+                else if (locationownership[player2location] == 3) {
+                    player3money = player3money + locationrent[player2location];
+                }
+                else if (locationownership[player2location] == 4) {
+                    player4money = player4money + locationrent[player2location];
+                }
+                remote.value = -1;
+            }
+            else if (currplayer == 3 && remote.value == 16743045) {
+                player3money = player3money - locationrent[player3location];
+                if (locationownership[player3location] == 1) {
+                    player1money = player1money + locationrent[player3location];
+                }
+                else if (locationownership[player3location] == 2) {
+                    player2money = player2money + locationrent[player3location];
+                }
+                else if (locationownership[player3location] == 4) {
+                    player4money = player4money + locationrent[player3location];
+                }
+                remote.value = -1;
+            }
+            else if (currplayer == 4 && remote.value == 16743045) {
+                player4money = player4money - locationrent[player4location];
+                if (locationownership[player4location] == 1) {
+                    player1money = player1money + locationrent[player4location];
+                }
+                else if (locationownership[player4location] == 2) {
+                    player2money = player2money + locationrent[player4location];
+                }
+                else if (locationownership[player4location] == 3) {
+                    player3money = player3money + locationrent[player4location];
+                }
+                remote.value = -1;
+            }
+      break;
+
+      default:
+      break;
+        }
+    
+    return state;
+}
+
+//enum Rent_States {Reset_Start, Reset};
+int TickFCT_Reset(int state) {
+    switch(state) {
+        case Reset_Start:
+        state = Reset;
+        break;
+
+        case Reset:
+        if (remote.value == 16716015) {
+                currplayer = 1;
+                player1location = 0;
+                player2location = 0;
+                player3location = 0;
+                player4location = 0;
+                player1money = 1500;
+                player2money = 1500;
+                player3money = 1500;
+                player4money = 1500;
+                diceroll1 = 0;
+                locationownership[40] = resetownership[40];
+                remote.value = -1;
+            }
+        break;
+
+        default:
+        break;
+    }
+        switch(state) {
+            case Reset:
+            
+      break;
+
+      default:
+      break;
+        }
+    
+    return state;
+}
